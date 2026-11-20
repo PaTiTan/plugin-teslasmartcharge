@@ -2,7 +2,7 @@
 
 ## 1.2.1-beta
 
-- Correctif : avertissement PHP « Undefined variable \$puissancePince » à chaque passage du cron hors mode Stand-By.
+- Correctif : avertissement PHP « Undefined variable $puissancePince » à chaque passage du cron hors mode Stand-By.
 
 ## 1.2.0-beta
 
