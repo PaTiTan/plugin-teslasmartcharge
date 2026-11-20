@@ -3,6 +3,11 @@ require_once dirname(__FILE__) . '/../../../../core/php/core.inc.php';
 
 class teslasmartcharge extends eqLogic {
 
+    // Délai de confirmation d'un changement d'ampérage dans le même sens avant de l'appliquer :
+    // court pour les hausses (ne pas gaspiller de soleil), long pour les baisses (ne pas réagir à un nuage).
+    const CONFIRMATION_HAUSSE = 10;
+    const CONFIRMATION_BAISSE = 60;
+
     // ====================================================================
     // LES COMPTEURS D'API ET LE NETTOYAGE JOURNALIER
     // ====================================================================
@@ -350,8 +355,9 @@ class teslasmartcharge extends eqLogic {
                 } 
                 else {
                     $elapsed = time() - $pendingSince;
-                    if ($elapsed < 60) {
-                        $logMsg = "[ATTENTE] Confirmation cible {$ampereParfait}A dans ".(60 - $elapsed)."s.";
+                    $delaiConfirmation = ($direction == 1) ? self::CONFIRMATION_HAUSSE : self::CONFIRMATION_BAISSE;
+                    if ($elapsed < $delaiConfirmation) {
+                        $logMsg = "[ATTENTE] Confirmation cible {$ampereParfait}A dans ".($delaiConfirmation - $elapsed)."s.";
                     } 
                     else {
                         $logMsg = "[ACTION] Application: {$ampereParfait}A.";
