@@ -1,0 +1,161 @@
+<div class="cmd cmd-widget" data-type="action" data-subtype="slider" data-template="badge" data-cmd_id="#id#" data-cmd_uid="#uid#" data-version="#version#" data-eqLogic_id="#eqLogic_id#">
+  <div class="title #hide_name#">
+    <div class="cmdName" style="margin-bottom:5px;">#name_display#</div>
+  </div>
+  <div class="widget-container-v">
+    <div class="battery-v">
+         <div class="juice-v"></div>
+    </div>
+    <div class="battery-level-v"></div>
+    
+    <input type="range" class="slider-overlay-v" min="0" max="100" step="1" value="#state#" orient="vertical">
+  </div>
+</div>
+
+<style>
+  :root {
+      --juice_alert_color: red;
+      --juice_inter_color: orange;
+      --juice_ok_color: green;
+      --battery_color: grey;
+      --widget_width_v: 60px;
+	  --widget_height_v: 90px;
+      --font-size: 12px;
+  }
+
+  .widget-container-v {
+  	height: calc(var(--widget_height_v) + 10px);
+    width: var(--widget_width_v);
+    display: inline-block;
+    position: relative;
+    margin: 10px;
+  }
+    
+  .battery-v {
+    width: var(--widget_width_v);
+    height: var(--widget_height_v);
+    border: 2px solid var(--battery_color);
+    border-radius: 5px;
+    padding: 4px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column-reverse;
+    background: transparent;
+  }
+  
+  .battery-v:after {
+    content: ' ';
+    background: var(--battery_color);
+    width: calc(var(--widget_width_v) / 2);
+    height: 5px;
+    position: absolute;
+    top: -5px;
+    left: 25%;
+    border-radius: 2px 2px 0px 0px;
+  }
+  
+  .battery-level-v {
+	position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--font-size);
+    color: var(--battery_color);
+    pointer-events: none;
+    z-index: 5;
+    font-weight: bold;
+  }
+  
+  .juice-v {
+    width: 100%;
+    transition: height 0.1s ease;
+  }
+
+  .juice-alert { background: var(--juice_alert_color); animation: blinky 1s ease-in-out infinite; }
+  .juice-inter { background: var(--juice_inter_color); }
+  .juice-ok { background: var(--juice_ok_color); }
+
+  @keyframes blinky {
+    0% {background:transparent;}
+    49% {background:transparent;}
+    50% {background:var(--juice_alert_color);}
+  }
+
+  .slider-overlay-v {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: var(--widget_width_v);
+    height: var(--widget_height_v);
+    opacity: 0;
+    cursor: pointer;
+    z-index: 10;
+    margin: 0;
+    -webkit-appearance: slider-vertical;
+  }
+</style>
+
+<script>
+  (function() {
+    var cmd_#id# = $('.cmd[data-cmd_id=#id#]');
+
+    function getOpositeColor(rgb, darkcolor, lightcolor) {
+      if (!rgb || rgb.indexOf('rgb') === -1) return darkcolor;
+      while (rgb.indexOf(' ') != -1) rgb = rgb.replace(' ', '');
+      var x = /([0-9]{0,3}),([0-9]{0,3}),([0-9]{0,3})/.exec(rgb);
+      if (x) {
+          var r = parseInt(x[1]), g = parseInt(x[2]), b = parseInt(x[3]);
+          return ((0.3 * r) + (0.59 * g) + (0.11 * b) <= 128) ? lightcolor : darkcolor;
+      }
+      return darkcolor;
+    }
+    
+    function updateVisual_#id#(val) {
+      var percentage = parseInt(val);
+      if (isNaN(percentage)) percentage = 0;
+
+      // Mise à jour hauteur et texte
+      cmd_#id#.find('.juice-v').css('height', (percentage == 0 ? '2' : percentage) + '%');
+      cmd_#id#.find('.battery-level-v').text(percentage + "%");
+      
+      var juice = cmd_#id#.find('.juice-v');
+      var levelText = cmd_#id#.find('.battery-level-v');
+      var borderColor = cmd_#id#.find('.battery-v').css("border-color");
+
+      // Logique des couleurs
+      juice.removeClass('juice-ok juice-inter juice-alert');
+      if (percentage <= 20) {
+          juice.addClass('juice-alert');
+          levelText.css('color', borderColor);
+      } else if (percentage <= 59) {
+          juice.addClass('juice-inter');
+          levelText.css('color', getOpositeColor(juice.css("background-color"), borderColor, "#FFF"));
+      } else {
+          juice.addClass('juice-ok');
+          levelText.css('color', getOpositeColor(juice.css("background-color"), borderColor, "#FFF"));
+      }
+    }
+
+    // Interaction utilisateur
+    cmd_#id#.find('.slider-overlay-v').on('input', function() {
+      updateVisual_#id#($(this).val());
+    });
+
+    cmd_#id#.find('.slider-overlay-v').on('change', function() {
+      jeedom.cmd.execute({id: '#id#', value: {slider: $(this).val()}});
+    });
+
+    // Mise à jour par Jeedom
+    jeedom.cmd.update['#id#'] = function(_options) {
+      cmd_#id#.find('.slider-overlay-v').val(_options.display_value);
+      updateVisual_#id#(_options.display_value);
+    }
+    
+    // Initialisation forcée avec la valeur réelle au démarrage
+    updateVisual_#id#('#state#');
+  })();
+</script>

@@ -1,0 +1,62 @@
+<div style="margin:5px;" class="cmd cmd-widget" data-type="action" data-subtype="slider" data-cmd_id="#id#" data-cmd_uid="#uid#" data-version="#version#" data-eqLogic_id="#eqLogic_id#">
+  
+  <div class="title #hide_name#">
+    <div class="cmdName" style="font-weight: bold;">#name_display#</div>
+  </div>
+
+  <input type="text" class="time" name="time#id#" value="#state#" style="padding: 5px; font-size: 1.2em; text-align: center; border-radius: 5px; width: 80px; font-weight: bold;">
+
+  <script>
+    var separator#id# = "h"; // J'ai mis 'h' au lieu de ':' pour que ça affiche 07h30
+
+    // LA LIGNE MAGIQUE : On charge le script depuis TON plugin !
+    $.include(['plugins/teslasmartcharge/core/template/dashboard/jquery-clock-timepicker.min.js'], function () {
+      $(document).ready(function () {
+
+        $("input[name=time#id#]").clockTimePicker({
+          alwaysSelectHoursFirst: true,
+          autosize: false,
+          colors: {
+            buttonTextColor: '#0797FF',
+            clockFaceColor: '#EEEEEE',
+            clockInnerCircleTextColor: '#888888',
+            clockInnerCircleUnselectableTextColor: '#CCCCCC',
+            clockOuterCircleTextColor: '#000000',
+            clockOuterCircleUnselectableTextColor: '#CCCCCC',
+            hoverCircleColor: '#DDDDDD',
+            popupBackgroundColor: '#FFFFFF',
+            popupHeaderBackgroundColor: '#0797FF',
+            popupHeaderTextColor: '#FFFFFF',
+            selectorColor: '#0797FF',
+            selectorNumberColor: '#FFFFFF'
+          },
+          minimum: '00h00',
+          maximum: '23h59',
+          precision: 5, // Les minutes sautent de 5 en 5, c'est plus pratique !
+          separator: separator#id#,
+          
+          // Quand l'utilisateur a fini de choisir l'heure
+          onChange: function (newVal, oldVal) {
+            let parts = newVal.split(separator#id#);
+            let finalValue = (parseInt(parts[0]) * 100) + parseInt(parts[1]); // Transforme 14h30 en 1430
+            jeedom.cmd.execute({ id: '#id#', value: { slider: finalValue } });
+          }
+        });
+      });
+    });
+
+    jeedom.cmd.update['#id#'] = function (_options) {
+      // Transformation de la valeur brute (ex: 730) en affichage "07h30"
+      let val = (_options.display_value !== '') ? parseInt(_options.display_value) : 700;
+      let hours = Math.floor(val / 100);
+      let minutes = val % 100;
+      
+      hours = (hours < 10) ? ('0' + hours) : hours;
+      minutes = (minutes < 10) ? ('0' + minutes) : minutes;
+      
+      document.querySelector("input[name='time#id#']").value = hours + separator#id# + minutes;
+    }
+
+    jeedom.cmd.update['#id#']({ display_value: '#state#' });
+  </script>
+</div>

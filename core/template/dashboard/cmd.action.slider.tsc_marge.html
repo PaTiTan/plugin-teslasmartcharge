@@ -1,0 +1,140 @@
+<div class="cmd cmd-widget" data-type="action" data-subtype="slider" data-template="badge" data-cmd_id="#id#" data-cmd_uid="#uid#" data-version="#version#">
+  <div class="title #hide_name#">
+    <div class="cmdName">#name_display#</div>
+  </div>
+  <div class="edf-widget-container">
+    <div class="grid-line center"></div>
+    <div class="margin-bar"></div>
+    <div class="value-display">0W</div>
+    
+    <input type="range" class="edf-slider" min="-300" max="300" step="50" value="#state#">
+  </div>
+  <div class="labels">
+    <span>EDF (Soutirage)</span>
+    <span>Injection (Solaire)</span>
+  </div>
+</div>
+
+<style>
+  :root {
+      --edf_blue_color: #005bbb;   
+      --solar_orange_color: #f39c12; 
+      --bg_track: #333;
+      --width_edf: 200px;
+      --height_edf: 35px;
+  }
+
+  .edf-widget-container {
+      width: var(--width_edf);
+      height: var(--height_edf);
+      background: var(--bg_track);
+      border-radius: 4px;
+      position: relative;
+      margin: 5px auto;
+      border: 1px solid #555;
+      overflow: hidden;
+  }
+
+  .grid-line.center {
+      position: absolute;
+      left: 50%;
+      top: 0;
+      width: 2px;
+      height: 100%;
+      background: white;
+      z-index: 3;
+      opacity: 0.6;
+  }
+
+  .margin-bar {
+      position: absolute;
+      top: 0;
+      height: 100%;
+      z-index: 2;
+      transition: width 0.2s ease, left 0.2s ease, right 0.2s ease;
+  }
+
+  .value-display {
+      position: absolute;
+      width: 100%;
+      line-height: var(--height_edf);
+      text-align: center;
+      color: white;
+      font-weight: bold;
+      font-size: 14px;
+      z-index: 4;
+      pointer-events: none;
+      text-shadow: 1px 1px 2px black;
+  }
+
+  .edf-slider {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      z-index: 10;
+      cursor: pointer;
+  }
+
+  .labels {
+      width: var(--width_edf);
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      margin: 0 auto;
+      color: #aaa;
+      padding: 0 2px;
+  }
+</style>
+
+<script>
+  (function() {
+    var cmd_#id# = $('.cmd[data-cmd_id=#id#]');
+
+    function updateEdfVisual(val) {
+      var value = parseInt(val);
+      var bar = cmd_#id#.find('.margin-bar');
+      var display = cmd_#id#.find('.value-display');
+      
+      var widthPercent = (Math.abs(value) / 600) * 100;
+      
+      if (value < 0) {
+          bar.css({
+              'left': 'auto',
+              'right': '50%',
+              'width': widthPercent + '%',
+              'background': 'var(--edf_blue_color)'
+          });
+          display.text(value + ' W');
+      } else if (value > 0) {
+          bar.css({
+              'left': '50%',
+              'right': 'auto',
+              'width': widthPercent + '%',
+              'background': 'var(--solar_orange_color)'
+          });
+          display.text('+' + value + ' W');
+      } else {
+          bar.css('width', '0%');
+          display.text('0 W');
+      }
+    }
+
+    cmd_#id#.find('.edf-slider').on('input', function() {
+      updateEdfVisual($(this).val());
+    });
+
+    cmd_#id#.find('.edf-slider').on('change', function() {
+      jeedom.cmd.execute({id: '#id#', value: {slider: $(this).val()}});
+    });
+
+    jeedom.cmd.update['#id#'] = function(_options) {
+      cmd_#id#.find('.edf-slider').val(_options.display_value);
+      updateEdfVisual(_options.display_value);
+    }
+    
+    updateEdfVisual('#state#');
+  })();
+</script>

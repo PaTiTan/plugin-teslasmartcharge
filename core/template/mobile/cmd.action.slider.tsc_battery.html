@@ -1,0 +1,152 @@
+<div class="cmd cmd-widget" data-type="action" data-subtype="slider" data-template="badge" data-cmd_id="#id#" data-cmd_uid="#uid#" data-version="#version#" data-eqLogic_id="#eqLogic_id#">
+  <div class="title #hide_name#">
+    <div class="cmdName">#name_display#</div>
+  </div>
+  <div class="widget-container">
+    <div class="battery">
+         <div class="juice"></div>
+    </div>
+    <div class="battery-level">100%</div>
+    
+    <input type="range" class="slider-overlay" min="0" max="100" step="1" value="#state#">
+  </div>
+</div>
+
+<style>
+  :root {
+      --juice_alert_color: red;
+      --juice_inter_color: orange;
+      --juice_ok_color: green;
+      --battery_color: grey;
+      --battery_level_color: grey;
+      --widget_width: 90px;
+	  --widget_height: 30px;
+      --font-size: 12px;
+  }
+
+  .widget-container {
+  	width: calc(var(--widget_width) + 10px);
+    display: block;
+    padding: 0px;
+    position: relative;
+  }
+    
+  .battery {
+    width: var(--widget_width);
+    height: var(--widget_height);
+    border: 2px solid var(--battery_color);
+    border-radius: 5px;
+    padding: 4px;
+    box-sizing: border-box;
+  }
+  
+  .battery:after {
+    content: ' ';
+    background: var(--battery_color);
+    width: 5px;
+    height: calc(var(--widget_height) / 2);
+    position: absolute;
+    right: 5px;
+    border-radius: 0px 2px 2px 0px;
+    top: 24%;
+  }
+  
+  .battery-level {
+	position: absolute;
+    top: 0;
+    left: -3px;
+    width: 100%;
+    font-size: var(--font-size);
+    height: 100%;
+    vertical-align: middle;
+    line-height: var(--widget_height);
+    text-align: center;
+    color: var(--battery_color);
+    pointer-events: none; /* Empêche le texte de bloquer le clic sur le curseur */
+  }
+  
+  .juice {
+    height: 100%;
+    float: left;
+    transition: width 0.1s ease; /* Rend le mouvement de la jauge plus fluide */
+  }
+
+  .juice-alert { background: var(--juice_alert_color); animation: blinky 1s ease-in-out infinite; animation-delay: 2s; }
+  .juice-inter { background: var(--juice_inter_color); }
+  .juice-ok { background: var(--juice_ok_color); }
+
+  @keyframes blinky {
+    0% {background:transparent;}
+    49% {background:transparent;}
+    50% {background:var(--juice_alert_color);}
+  }
+
+  /* Style du curseur invisible */
+  .slider-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: var(--widget_width);
+    height: var(--widget_height);
+    opacity: 0; /* Rend le curseur natif 100% transparent */
+    cursor: pointer;
+    z-index: 10;
+    margin: 0;
+  }
+</style>
+
+<script>
+  function getOpositeColor(rgb, darkcolor, lightcolor) {
+    while (rgb.indexOf(' ') != -1) rgb = rgb.replace(' ', '');
+    if ((x = /([0-9]{0,3}),([0-9]{0,3}),([0-9]{0,3})/.exec(rgb))) {
+        color = { 'r': parseInt(x[1]), 'g': parseInt(x[2]), 'b': parseInt(x[3]) };
+        OpositeColor = ((0.3 * (color['r'])) + (0.59 * (color['g'])) + (0.11 * (color['b'])) <= 128) ? lightcolor : darkcolor;
+        return OpositeColor;
+    }
+    return -1;
+  }
+  
+  // Isoler la commande pour éviter les conflits si plusieurs widgets sur la page
+  var cmd_#id# = $('.cmd[data-cmd_id=#id#]');
+  
+  // Fonction qui met à jour l'aspect visuel de la batterie
+  function updateVisual_#id#(percentage_value) {
+    cmd_#id#.find('.juice').css('width', (percentage_value == 0 ? '5' : percentage_value) + '%');
+    cmd_#id#.find('.battery-level').html(percentage_value + "%");
+    
+    if (percentage_value >= 0 && percentage_value <= 20) {
+    	cmd_#id#.find('.juice').removeClass('juice-ok juice-inter').addClass('juice-alert');
+        cmd_#id#.find('.battery-level').css('color', cmd_#id#.find('.battery').css("border-color"));
+    } else if (percentage_value >= 21 && percentage_value <= 59) {
+      	cmd_#id#.find('.juice').removeClass('juice-ok juice-alert').addClass('juice-inter');
+        cmd_#id#.find('.battery-level').css('color', getOpositeColor(cmd_#id#.find('.juice').css("background-color"), cmd_#id#.find('.battery').css("border-color"), "#FFF"));
+    } else {
+    	cmd_#id#.find('.juice').removeClass('juice-inter juice-alert').addClass('juice-ok');
+        cmd_#id#.find('.battery-level').css('color', getOpositeColor(cmd_#id#.find('.juice').css("background-color"), cmd_#id#.find('.battery').css("border-color"), "#FFF"));
+    }
+  }
+
+  // Événement : L'utilisateur bouge le curseur (met à jour le visuel en direct sans envoyer à Jeedom)
+  cmd_#id#.find('.slider-overlay').on('input', function() {
+    updateVisual_#id#($(this).val());
+  });
+
+  // Événement : L'utilisateur relâche le clic (envoie la valeur au core de Jeedom)
+  cmd_#id#.find('.slider-overlay').on('change', function() {
+    jeedom.cmd.execute({id: '#id#', value: {slider: $(this).val()}});
+  });
+
+  // Mise à jour venant du Core de Jeedom
+  jeedom.cmd.update['#id#'] = function(_options) {
+    var percentage_value = _options.display_value;
+    
+    // Met à jour la position du curseur invisible
+    cmd_#id#.find('.slider-overlay').val(percentage_value);
+    
+    // Met à jour l'affichage
+    updateVisual_#id#(percentage_value);
+  }
+  
+  // Initialisation au chargement de la page
+  jeedom.cmd.update['#id#']({display_value:'#state#',valueDate:'#valueDate#',collectDate:'#collectDate#',alertLevel:'#alertLevel#'});
+</script>

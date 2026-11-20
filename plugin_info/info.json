@@ -1,0 +1,27 @@
+{
+    "id" : "teslasmartcharge",
+    "name" : "Tesla Smart Charge",
+    "description" : "Le cerveau ultime pour la gestion intelligente, planifiée et solaire de la recharge de votre véhicule Tesla.",
+    "licence" : "AGPL",
+    "author" : "PaTiTan",
+    "require" : "4.2.0",
+    "category" : "energy",
+    "changelog" : "",
+    "documentation" : "",
+    "language" : [
+        "fr_FR"
+    ],
+    "compatibility" : [
+        "smart",
+        "atlas",
+        "rpi",
+        "docker",
+        "diy",
+        "v4"
+    ],
+    "version" : "1.0.0-beta",
+    "hasDependency" : false,
+    "hasOwnDaemon" : false,
+    "maxDependancyInstallTime" : 0,
+    "issue" : ""
+}

@@ -1,0 +1,43 @@
+<div class="cmd cmd-widget" data-type="action" data-subtype="message" data-cmd_id="#id#" data-cmd_uid="#uid#" data-version="#version#" data-eqLogic_id="#eqLogic_id#" style="width: 220px;">
+    <div class="title #hide_name#">
+        <div class="cmdName">#name_display#</div>
+    </div>
+    
+    <div class="content-sm" style="display: flex; align-items: center; justify-content: center; padding-top: 5px;">
+        <input type="datetime-local" class="form-control input-sm message tsc-date-input" data-cmd_id="#id#" style="width: 155px; border-radius: 4px 0 0 4px; border-right: none; color: var(--text-color); background-color: var(--bg-color);">
+        
+        <a class="btn btn-sm btn-default execute" style="border-radius: 0 4px 4px 0;" title="Valider">
+            <i class="fas fa-check" style="color: #88c057;"></i>
+        </a>
+    </div>
+
+    <script>
+        var stateVal = '#state#';
+        
+        if (stateVal != '' && stateVal.indexOf(' ') > -1) {
+            stateVal = stateVal.replace(' ', 'T');
+            $('.cmd[data-cmd_uid=#uid#] .tsc-date-input').val(stateVal);
+        }
+
+        // --- NOUVEAUTÉ : VERROUILLAGE DU PASSÉ ---
+        // On calcule la date/heure actuelle au format local
+        var now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        var minDatetime = now.toISOString().slice(0,16);
+        // On interdit au calendrier de descendre en dessous de cette valeur
+        $('.cmd[data-cmd_uid=#uid#] .tsc-date-input').attr('min', minDatetime);
+
+        $('.cmd[data-cmd_uid=#uid#] .execute').on('click', function() {
+            var selectedDate = $('.cmd[data-cmd_uid=#uid#] .tsc-date-input').val();
+            
+            if(selectedDate.indexOf('T') > -1) {
+                selectedDate = selectedDate.replace('T', ' ');
+            }
+            
+            jeedom.cmd.execute({
+                id: '#id#', 
+                value: { message: selectedDate }
+            });
+        });
+    </script>
+</div>
