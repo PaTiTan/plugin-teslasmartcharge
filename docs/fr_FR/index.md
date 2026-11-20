@@ -10,11 +10,13 @@ Tesla Smart Charge pilote la recharge d'une Tesla à partir d'un plugin Tesla ex
 - **Heures creuses** : une ou plusieurs plages, choisies avec le sélecteur d'heure (de 5 en 5 minutes). Le bouton **Ajouter une plage** crée une plage supplémentaire. Si energyManager est installé, une case permet d'utiliser ses plages à la place.
 - **Mode télémétrie intensive** : écrit un statut dans le journal chaque minute.
 
+Après un changement des capteurs, il faut **réenregistrer l'équipement** (bouton Sauvegarder) pour que les écouteurs soient reconstruits avec les nouvelles sondes.
+
 ## Modes
 
 | Mode | Fonctionnement |
 |---|---|
-| Solaire | Ajuste l'ampérage (2 à 32 A) au surplus : batterie + injection + puissance déjà utilisée par la voiture. Un changement doit être confirmé 60 s, sauf si la maison se vide. |
+| Solaire | Ajuste l'ampérage (2 à 32 A) au surplus : batterie + injection + puissance déjà utilisée par la voiture. Une hausse est confirmée 10 s, une baisse 60 s ; coupure immédiate si la maison se vide. |
 | Planifié | Charge pour atteindre la cible à la date choisie, en privilégiant les heures creuses (toutes les plages) avec un ampérage lissé. |
 | Stand-By | Charge arrêtée. Repasse en Solaire si une charge est détectée après rebranchement. |
 | Non actif | Le plugin ne fait plus rien. |

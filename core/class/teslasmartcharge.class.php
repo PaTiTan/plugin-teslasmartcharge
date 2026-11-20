@@ -21,6 +21,51 @@ class teslasmartcharge extends eqLogic {
         }
     }
 
+    /** Commande Jeedom depuis sa forme texte (#[Objet][Equipement][Commande]#) ; null si vide, introuvable ou en erreur. */
+    private static function cmdFromString($str) {
+        if (!is_string($str) || trim($str) === '') return null;
+        try {
+            $c = cmd::byString($str);
+            return is_object($c) ? $c : null;
+        } catch (Throwable $e) {
+            return null;
+        }
+    }
+
+    /** Valeur par défaut si le capteur n'est pas configuré ; null si configuré mais introuvable ou non numérique. */
+    private static function readSensor($configKey, $default) {
+        $str = config::byKey($configKey, 'teslasmartcharge');
+        if (!is_string($str) || trim($str) === '') return $default;
+        $c = self::cmdFromString($str);
+        if ($c === null) return null;
+        try {
+            $v = $c->execCmd();
+        } catch (Throwable $e) {
+            return null;
+        }
+        return is_numeric($v) ? floatval($v) : null;
+    }
+
+    /** Envoie un ordre ou un refresh à la Tesla : compteur d'API, journal, et jamais d'exception vers l'appelant. */
+    private static function sendOrder($eqLogic, $cmd, $options, $label, $type = 'ordre') {
+        if (!is_object($cmd)) return false;
+        self::incrementApiCounter($eqLogic, $type);
+        log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : " . $label);
+        try {
+            $cmd->execCmd($options);
+            return true;
+        } catch (Throwable $e) {
+            log::add('teslasmartcharge', 'error', "Ordre Tesla en échec ({$label}) : " . $e->getMessage());
+            return false;
+        }
+    }
+
+    /** Mémorise la dernière consigne d'ampérage envoyée (0 = arrêt) pour ne pas la renvoyer tant que la Tesla ne l'a pas répercutée. */
+    private static function rememberOrder($eqLogic, $amp) {
+        $eqLogic->setCache('last_cmd_amp', (int) $amp);
+        $eqLogic->setCache('last_cmd_time', time());
+    }
+
     public static function cronDaily() {
         foreach (eqLogic::byType('teslasmartcharge', true) as $eqLogic) {
             if ($eqLogic->getIsEnable() != 1) continue;
@@ -87,6 +132,7 @@ class teslasmartcharge extends eqLogic {
 
     /** Nombre de minutes d'heures creuses entre deux timestamps. */
     public static function hcMinutesBetween($from, $to) {
+        $to = min($to, $from + 14 * 86400); // borne à 14 jours : une date lointaine ne doit pas boucler des millions de fois
         $count = 0;
         $slots = self::hcSlots();
         for ($t = $from; $t < $to; $t += 60) {
@@ -111,7 +157,7 @@ class teslasmartcharge extends eqLogic {
         if ($batterieVal >= $cibleCharge) return "[PLAN] Cible déjà atteinte. Aucune charge requise.";
 
         $datePlanifieeVal = is_object($eqLogic->getCmd(null, 'date_planifiee')) ? $eqLogic->getCmd(null, 'date_planifiee')->execCmd() : '';
-        $targetTime = strtotime($datePlanifieeVal);
+        $targetTime = strtotime((string) $datePlanifieeVal);
         $now = time();
 
         if (!$targetTime || $targetTime <= $now) return "";
@@ -138,34 +184,42 @@ class teslasmartcharge extends eqLogic {
     // L'ÉCOUTEUR HAUTE VITESSE (LE CERVEAU SOLAIRE)
     // ====================================================================
     public static function solarListener($_event) {
-        $eqLogic_id = isset($_event['options']['eqLogic_id']) ? $_event['options']['eqLogic_id'] : null;
+        // Jeedom (listener::run) transmet les options à plat ; le cron les passe dans 'options' : on accepte les deux formes.
+        $opt = (isset($_event['options']) && is_array($_event['options'])) ? $_event['options'] : array();
+        $eqLogic_id = isset($_event['eqLogic_id']) ? $_event['eqLogic_id'] : (isset($opt['eqLogic_id']) ? $opt['eqLogic_id'] : null);
         if (!$eqLogic_id) return;
         
         $eqLogic = eqLogic::byId($eqLogic_id);
         if (!is_object($eqLogic) || $eqLogic->getIsEnable() != 1) return;
 
+        // Un seul traitement à la fois par équipement : plusieurs capteurs qui publient ensemble lancent plusieurs processus en parallèle,
+        // et l'anti-rebond de 10 s ci-dessous n'est pas atomique (ordres en double, quota API consommé). Le verrou est libéré à la sortie.
+        $lock = false;
+        try {
+            $lock = @fopen(jeedom::getTmpFolder('teslasmartcharge') . '/solar_' . intval($eqLogic_id) . '.lock', 'c');
+        } catch (Throwable $e) {
+            $lock = false;
+        }
+        if ($lock !== false && !flock($lock, LOCK_EX | LOCK_NB)) return;
+
         $modeActuelVal = is_object($eqLogic->getCmd(null, 'mode_actuel')) ? $eqLogic->getCmd(null, 'mode_actuel')->execCmd() : '';
         if ($modeActuelVal != 'Solaire') return; // Si mode est 'Non actif' ou autre, le listener est inopérant.
 
-        $eqLogic->setCache('standby_already_logged', 0);
-
-        $isForced = isset($_event['force']) ? $_event['force'] : false;
+        $isForced = !empty($_event['force']) || !empty($opt['force']);
         $lastActionTime = $eqLogic->getCache('last_solar_action', 0);
         $timeSinceLast = time() - $lastActionTime;
 
-        if (!$isForced && ($timeSinceLast < 10)) return; 
+        if (!$isForced && ($timeSinceLast < 10)) return;
         $eqLogic->setCache('last_solar_action', time());
+        if ($eqLogic->getCache('standby_already_logged', 0) != 0) $eqLogic->setCache('standby_already_logged', 0);
 
-        $cmdHabitationStr = config::byKey('infoHabitation', 'teslasmartcharge');
-        $cmdNiveauBatStr = config::byKey('infoBatterieMaison', 'teslasmartcharge');
-        $cmdPuissanceBatStr = config::byKey('infoPuissanceBatterieMaison', 'teslasmartcharge');
-        $infoPinceStr = config::byKey('infoPuissanceVoiture', 'teslasmartcharge'); 
-
-        $valeurHabitation = $cmdHabitationStr != '' && is_object(cmd::byString($cmdHabitationStr)) ? floatval(cmd::byString($cmdHabitationStr)->execCmd()) : 0;
-        $niveauBatMaison = $cmdNiveauBatStr != '' && is_object(cmd::byString($cmdNiveauBatStr)) ? floatval(cmd::byString($cmdNiveauBatStr)->execCmd()) : 100;
-        $puissanceBatMaison = $cmdPuissanceBatStr != '' && is_object(cmd::byString($cmdPuissanceBatStr)) ? floatval(cmd::byString($cmdPuissanceBatStr)->execCmd()) : 0;
+        // Une mesure configurée mais illisible vaut null (et non 0) : on garde alors la consigne (voir plus bas).
+        $valeurHabitation = self::readSensor('infoHabitation', 0);
+        $niveauBatMaison = self::readSensor('infoBatterieMaison', 100);
+        $puissanceBatMaison = self::readSensor('infoPuissanceBatterieMaison', 0);
         $margeVal = is_object($eqLogic->getCmd(null, 'marge_actuelle')) ? floatval($eqLogic->getCmd(null, 'marge_actuelle')->execCmd()) : 0;
-        $puissancePince = $infoPinceStr != '' && is_object(cmd::byString($infoPinceStr)) ? floatval(cmd::byString($infoPinceStr)->execCmd()) : 0;
+        $puissancePince = self::readSensor('infoPuissanceVoiture', 0);
+        if ($puissancePince === null) $puissancePince = 0;
 
         $teslaEqId = $eqLogic->getConfiguration('tesla_eqlogic_id');
         if ($teslaEqId == '') return;
@@ -174,6 +228,12 @@ class teslasmartcharge extends eqLogic {
 
         $priorite = is_object($eqLogic->getCmd(null, 'priorite_charge')) ? $eqLogic->getCmd(null, 'priorite_charge')->execCmd() : 'voiture';
         $seuilBat = is_object($eqLogic->getCmd(null, 'seuil_batterie_maison')) ? floatval($eqLogic->getCmd(null, 'seuil_batterie_maison')->execCmd()) : 80;
+
+        // Mesure illisible : on ne décide pas sur une valeur inventée (0 W ou 100 %), la consigne en cours est conservée.
+        $mesureIllisible = ($valeurHabitation === null || $puissanceBatMaison === null || ($niveauBatMaison === null && $priorite == 'maison'));
+        if ($valeurHabitation === null) $valeurHabitation = 0;
+        if ($puissanceBatMaison === null) $puissanceBatMaison = 0;
+        if ($niveauBatMaison === null) $niveauBatMaison = 100;
 
         $cmdAwake = $teslaEq->getCmd(null, 'is_online');
         $cmdCable = $teslaEq->getCmd(null, 'charge_port_latch');
@@ -191,13 +251,12 @@ class teslasmartcharge extends eqLogic {
             $eqLogic->checkAndUpdateCmd('mode_actuel', 'Stand-By');
             $eqLogic->setCache('standby_already_logged', 1);
             $logMsg = "[STAND-BY] Cible atteinte ({$cibleCharge}%). Bascule auto sur Stand-By.";
-            $eqLogic->checkAndUpdateCmd('statut_action', substr($logMsg, 0, 127));
+            $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($logMsg, 0, 127, 'UTF-8'));
             log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
-            
+
             if (is_object($cmdControlStr)) {
-                self::incrementApiCounter($eqLogic, 'ordre');
-                log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Envoi de l'ordre d'ARRÊT de la charge (0).");
-                $cmdControlStr->execCmd(array('select' => '0'));
+                self::sendOrder($eqLogic, $cmdControlStr, array('select' => '0'), "Envoi de l'ordre d'ARRÊT de la charge (0).");
+                $eqLogic->setCache('last_cmd_amp', -1); // on quitte le mode Solaire : plus de consigne en attente de retour
             }
             return;
         }
@@ -206,13 +265,13 @@ class teslasmartcharge extends eqLogic {
 
         $isAwake = false;
         if (is_object($cmdAwake)) {
-            $val = strtolower($cmdAwake->execCmd());
+            $val = strtolower((string) $cmdAwake->execCmd());
             if (in_array($val, ['1', 'true', 'online', 'awake'])) $isAwake = true;
         }
 
         $isPlugged = false;
         if (is_object($cmdCable)) {
-            $val = strtolower($cmdCable->execCmd());
+            $val = strtolower((string) $cmdCable->execCmd());
             if (in_array($val, ['engagé', 'engaged', 'connected', 'plugged', '1', 'true'])) $isPlugged = true;
         }
 
@@ -221,29 +280,52 @@ class teslasmartcharge extends eqLogic {
             $eqLogic->setCache('standby_already_logged', 1);
             $eqLogic->setCache('action_pending_since', 0);
             $logMsg = "[STAND-BY] Voiture débranchée. Bascule auto sur Stand-By.";
-            $eqLogic->checkAndUpdateCmd('statut_action', substr($logMsg, 0, 127));
+            $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($logMsg, 0, 127, 'UTF-8'));
             log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
-            
+
             if (is_object($cmdControlStr)) {
-                self::incrementApiCounter($eqLogic, 'ordre');
-                log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Envoi de l'ordre d'ARRÊT de la charge (0) (Sécurité débranchement).");
-                $cmdControlStr->execCmd(array('select' => '0'));
+                self::sendOrder($eqLogic, $cmdControlStr, array('select' => '0'), "Envoi de l'ordre d'ARRÊT de la charge (0) (Sécurité débranchement).");
+                $eqLogic->setCache('last_cmd_amp', -1);
             }
             return;
         }
 
         $currentAmperage = is_object($cmdAmps) ? floatval($cmdAmps->execCmd()) : 0;
-        $isCharging = ($currentAmperage > 0 || $puissancePince > 200); 
+        $isCharging = ($currentAmperage > 0 || $puissancePince > 200);
+
+        if ($mesureIllisible) {
+            // On ne décide pas sur une valeur inventée : la consigne en cours est conservée... sauf si la batterie se décharge
+            // (mesure de puissance batterie lisible) pendant la charge : la voiture ne doit jamais vivre de la batterie, on coupe.
+            $dejaArrete = ((int) $eqLogic->getCache('last_cmd_amp', -1) === 0 && (time() - (int) $eqLogic->getCache('last_cmd_time', 0)) < 120);
+            $battLue = self::readSensor('infoPuissanceBatterieMaison', 0);
+            if ($battLue !== null && $battLue < -50 && $isCharging && is_object($cmdControlStr) && !$dejaArrete) {
+                if (self::sendOrder($eqLogic, $cmdControlStr, array('select' => '0'), "Envoi de l'ordre d'ARRÊT de la charge (0) (mesure illisible, batterie qui se décharge).")) {
+                    self::rememberOrder($eqLogic, 0);
+                }
+            }
+            $eqLogic->checkAndUpdateCmd('statut_action', "[CAPTEUR] Mesure illisible : consigne conservée.");
+            return;
+        }
 
         $wakeupFailed = $eqLogic->getCache('wakeup_failed', 0);
         $wakeupPending = $eqLogic->getCache('wakeup_pending', 0);
         $lastWakeupTime = $eqLogic->getCache('last_wakeup_time', 0);
 
+        // Voiture réveillée : plus de raison d'ignorer les ordres (même la coupure d'urgence) pendant 30 min.
+        if ($isAwake) {
+            if ($wakeupFailed == 1 || $wakeupPending == 1) {
+                $eqLogic->setCache('wakeup_failed', 0);
+                $eqLogic->setCache('wakeup_pending', 0);
+            }
+            $wakeupFailed = 0;
+            $wakeupPending = 0;
+        }
+
         if ($wakeupFailed == 1) {
             $elapsed = time() - $lastWakeupTime;
             if ($elapsed < 1800) {
                 $logMsg = "[SECURITE] Ignore pdt ".(1800 - $elapsed)."s.";
-                $eqLogic->checkAndUpdateCmd('statut_action', substr($logMsg, 0, 127));
+                $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($logMsg, 0, 127, 'UTF-8'));
                 log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
                 return;
             } else {
@@ -260,14 +342,12 @@ class teslasmartcharge extends eqLogic {
                     $lastRefresh = $eqLogic->getCache('last_refresh_time', 0);
                     if (time() - $lastRefresh >= 30) {
                         if (is_object($cmdRefresh)) {
-                            self::incrementApiCounter($eqLogic, 'info');
-                            log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Ordre de REFRESH (Actualisation API) envoyé.");
-                            $cmdRefresh->execCmd();
+                            self::sendOrder($eqLogic, $cmdRefresh, null, "Ordre de REFRESH (Actualisation API) envoyé.", 'info');
                         }
                         $eqLogic->setCache('last_refresh_time', time());
                     }
                     $logMsg = "[ATTENTE API] Interrogation Tesla en cours ({$elapsed}s/150s).";
-                    $eqLogic->checkAndUpdateCmd('statut_action', substr($logMsg, 0, 127));
+                    $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($logMsg, 0, 127, 'UTF-8'));
                     log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
                     return;
                 } else {
@@ -275,7 +355,7 @@ class teslasmartcharge extends eqLogic {
                     $eqLogic->setCache('wakeup_pending', 0);
                     $eqLogic->setCache('last_wakeup_time', time());
                     $logMsg = "[ECHEC] Tesla injoignable. Pause 30m.";
-                    $eqLogic->checkAndUpdateCmd('statut_action', substr($logMsg, 0, 127));
+                    $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($logMsg, 0, 127, 'UTF-8'));
                     log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
                     return;
                 }
@@ -286,13 +366,24 @@ class teslasmartcharge extends eqLogic {
         // La voiture n'attend JAMAIS un niveau de batterie : elle prend tout ce que la batterie n'absorbe pas (l'injection) et charge dès
         // qu'il y en a assez (2 A). Au-dessus du seuil, ou en priorité « voiture », la charge de la batterie compte aussi dans son surplus.
         $batterieDabord = ($priorite == 'maison' && $niveauBatMaison < $seuilBat);
-        $apportBatterie = $batterieDabord ? 0 : $puissanceBatMaison;
+        // La décharge de la batterie compte toujours (la voiture ne doit pas être alimentée par la batterie, même en priorité « maison »).
+        $apportBatterie = $batterieDabord ? min(0, $puissanceBatMaison) : $puissanceBatMaison;
         $surplusBrut = $apportBatterie - $valeurHabitation - $margeVal;
         $puissanceTotaleAllouable = $surplusBrut + $puissancePince;
-        
+
         $ampereParfait = floor($puissanceTotaleAllouable / 230);
         if ($ampereParfait > 32) $ampereParfait = 32;
-        if ($ampereParfait < 2) $ampereParfait = 0; 
+        if ($ampereParfait < 2) $ampereParfait = 0;
+
+        // Dernière consigne envoyée : tant que la Tesla ne l'a pas répercutée (le courant lu est rafraîchi tard),
+        // on ne la renvoie pas (quota d'API). Elle est oubliée dès que le courant lu la rejoint, ou après 120 s.
+        $lastCmdAmp = (int) $eqLogic->getCache('last_cmd_amp', -1);
+        $lastCmdTime = (int) $eqLogic->getCache('last_cmd_time', 0);
+        if ($lastCmdAmp >= 0 && (int) $currentAmperage === $lastCmdAmp) {
+            $eqLogic->setCache('last_cmd_amp', -1);
+            $lastCmdAmp = -1;
+        }
+        $ordreEnAttente = ($lastCmdAmp >= 0 && (time() - $lastCmdTime) < 120 && (int) $ampereParfait === $lastCmdAmp);
 
         $logMsg = "";
 
@@ -303,24 +394,29 @@ class teslasmartcharge extends eqLogic {
                 $actionUrgente = true;
             }
 
-            if ($actionUrgente) {
+            if ($ordreEnAttente) {
+                $logMsg = "[ATTENTE RETOUR] {$ampereParfait}A déjà demandés, attente de la Tesla.";
+                $eqLogic->setCache('action_pending_since', 0);
+                $eqLogic->setCache('action_direction', 0);
+            }
+            elseif ($actionUrgente) {
                 $logMsg = "[URGENCE] Maison se vide. Act: {$ampereParfait}A.";
-                $eqLogic->setCache('action_pending_since', 0); 
-                
+                $eqLogic->setCache('action_pending_since', 0);
+
                 if ($ampereParfait == 0) {
                     if (is_object($cmdControlStr)) {
-                        self::incrementApiCounter($eqLogic, 'ordre');
-                        log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Envoi de l'ordre d'ARRÊT de la charge (0).");
-                        $cmdControlStr->execCmd(array('select' => '0'));
+                        if (self::sendOrder($eqLogic, $cmdControlStr, array('select' => '0'), "Envoi de l'ordre d'ARRÊT de la charge (0).")) {
+                            self::rememberOrder($eqLogic, 0);
+                        }
                     }
                 } else {
                     if (is_object($cmdAmperageStr)) {
-                        self::incrementApiCounter($eqLogic, 'ordre');
-                        log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Modification de l'ampérage à {$ampereParfait}A.");
-                        $cmdAmperageStr->execCmd(array('slider' => $ampereParfait));
+                        if (self::sendOrder($eqLogic, $cmdAmperageStr, array('slider' => (int) $ampereParfait), "Modification de l'ampérage à {$ampereParfait}A.")) {
+                            self::rememberOrder($eqLogic, $ampereParfait);
+                        }
                     }
                 }
-            } 
+            }
             elseif ($ampereParfait == $currentAmperage) {
                 if ($currentAmperage == 0) {
                     $logMsg = "[SURVEILLANCE] Manque surplus (".round($puissanceTotaleAllouable)."W).";
@@ -357,17 +453,15 @@ class teslasmartcharge extends eqLogic {
                         
                         if ($ampereParfait == 0) {
                             if (is_object($cmdControlStr)) {
-                                self::incrementApiCounter($eqLogic, 'ordre');
-                                log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Envoi de l'ordre d'ARRÊT de la charge (0).");
-                                $cmdControlStr->execCmd(array('select' => '0'));
+                                if (self::sendOrder($eqLogic, $cmdControlStr, array('select' => '0'), "Envoi de l'ordre d'ARRÊT de la charge (0).")) {
+                                    self::rememberOrder($eqLogic, 0);
+                                }
                             }
                         } else {
                             if (!$isAwake) {
                                 $logMsg .= " -> [API TESLA] Envoi ordre réveil.";
                                 if (is_object($cmdWakeUpStr)) {
-                                    self::incrementApiCounter($eqLogic, 'ordre');
-                                    log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Ordre de RÉVEIL envoyé.");
-                                    $cmdWakeUpStr->execCmd(array('select' => '1'));
+                                    self::sendOrder($eqLogic, $cmdWakeUpStr, array('select' => '1'), "Ordre de RÉVEIL envoyé.");
                                 }
                                 $eqLogic->setCache('wakeup_pending', 1);
                                 $eqLogic->setCache('last_wakeup_time', time());
@@ -375,16 +469,14 @@ class teslasmartcharge extends eqLogic {
                             } else {
                                 if (!$isCharging) {
                                     if (is_object($cmdControlStr)) {
-                                        self::incrementApiCounter($eqLogic, 'ordre');
-                                        log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Envoi de l'ordre de DÉMARRAGE de la charge (1).");
-                                        $cmdControlStr->execCmd(array('select' => '1'));
+                                        self::sendOrder($eqLogic, $cmdControlStr, array('select' => '1'), "Envoi de l'ordre de DÉMARRAGE de la charge (1).");
                                     }
                                     sleep(2);
                                 }
                                 if (is_object($cmdAmperageStr)) {
-                                    self::incrementApiCounter($eqLogic, 'ordre');
-                                    log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Modification de l'ampérage à {$ampereParfait}A.");
-                                    $cmdAmperageStr->execCmd(array('slider' => $ampereParfait));
+                                    if (self::sendOrder($eqLogic, $cmdAmperageStr, array('slider' => (int) $ampereParfait), "Modification de l'ampérage à {$ampereParfait}A.")) {
+                                        self::rememberOrder($eqLogic, $ampereParfait);
+                                    }
                                 }
                             }
                         }
@@ -392,28 +484,36 @@ class teslasmartcharge extends eqLogic {
                 }
             }
         }
-        
-        $eqLogic->checkAndUpdateCmd('statut_action', substr($logMsg, 0, 127));
+
+        $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($logMsg, 0, 127, 'UTF-8'));
         if ($logMsg != "") log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
     }
 
     // ====================================================================
     // LE MOTEUR DE FOND (CRON)
     // ====================================================================
-    public static function cron($_forceOff = false) {
-        
+    // Jeedom appelle cron() sans argument (toutes les minutes). $_forceOff et $_onlyEqId servent aux appels internes d'un seul équipement.
+    public static function cron($_forceOff = false, $_onlyEqId = null) {
+
         $minuteActuelle = intval(date('i'));
         $isDebugMode = config::byKey('debugMode', 'teslasmartcharge', 0);
         $forceLog = ($minuteActuelle % 5 == 0) || ($isDebugMode == 1 || $isDebugMode == '1');
 
         foreach (eqLogic::byType('teslasmartcharge', true) as $eqLogic) {
-            if ($eqLogic->getIsEnable() != 1) continue; 
-            
+            unset($puissancePince); // ne pas hériter de la mesure de l'équipement précédent
+            if ($_onlyEqId !== null && $eqLogic->getId() != $_onlyEqId) continue;
+            if ($eqLogic->getIsEnable() != 1) continue;
+
             $modeActuelVal = is_object($eqLogic->getCmd(null, 'mode_actuel')) ? $eqLogic->getCmd(null, 'mode_actuel')->execCmd() : '';
-            
+
             // --- COUPE-CIRCUIT ABSOLU : MODE NON ACTIF ---
             if ($modeActuelVal == 'Non actif') {
                 continue; // Le plugin est totalement désactivé pour cet équipement.
+            }
+
+            // Mode vide ou inconnu : on ne touche à rien (sinon une charge manuelle serait coupée chaque minute).
+            if (!in_array($modeActuelVal, array('Solaire', 'Planifié', 'Stand-By'), true)) {
+                continue;
             }
 
             $teslaEqId = $eqLogic->getConfiguration('tesla_eqlogic_id');
@@ -421,17 +521,11 @@ class teslasmartcharge extends eqLogic {
             $teslaEq = eqLogic::byId($teslaEqId);
             if (!is_object($teslaEq)) continue;
 
-            if ($modeActuelVal == 'Solaire') {
-                self::solarListener(array('options' => array('eqLogic_id' => $eqLogic->getId())));
-                continue;
-            }
-
-            log::add('teslasmartcharge', 'debug', "🟢 [LECTURE LOCALE JEEDOM] Vérification des capteurs et états (cache local).");
-
+            // Détails de charge (énergie ajoutée, vitesse) : mis à jour dans tous les modes, y compris Solaire.
             $cmdDetails = $teslaEq->getCmd(null, 'DETAILS');
             if (is_object($cmdDetails)) {
                 $rawJsonVal = $cmdDetails->execCmd();
-                if (preg_match('/\{.*\}/', $rawJsonVal, $matches)) {
+                if (preg_match('/\{.*\}/s', (string) $rawJsonVal, $matches)) {
                     $data = json_decode($matches[0], true);
                     if (is_array($data)) {
                         if (isset($data['charge_energy_added'])) $eqLogic->checkAndUpdateCmd('energie_ajoutee', floatval($data['charge_energy_added']));
@@ -439,6 +533,13 @@ class teslasmartcharge extends eqLogic {
                     }
                 }
             }
+
+            if ($modeActuelVal == 'Solaire') {
+                self::solarListener(array('options' => array('eqLogic_id' => $eqLogic->getId())));
+                continue;
+            }
+
+            log::add('teslasmartcharge', 'debug', "🟢 [LECTURE LOCALE JEEDOM] Vérification des capteurs et états (cache local).");
 
             $cibleCharge = is_object($eqLogic->getCmd(null, 'cible_charge')) ? floatval($eqLogic->getCmd(null, 'cible_charge')->execCmd()) : 100;
             $cmdBat = $teslaEq->getCmd(null, 'battery_level');
@@ -457,7 +558,7 @@ class teslasmartcharge extends eqLogic {
             $cmdCable = $teslaEq->getCmd(null, 'charge_port_latch');
             $isPlugged = false;
             if (is_object($cmdCable)) {
-                $val = strtolower($cmdCable->execCmd());
+                $val = strtolower((string) $cmdCable->execCmd());
                 if (in_array($val, ['engagé', 'engaged', 'connected', 'plugged', '1', 'true'])) $isPlugged = true;
             }
 
@@ -466,7 +567,7 @@ class teslasmartcharge extends eqLogic {
                 $modeActuelVal = 'Stand-By'; 
                 $eqLogic->setCache('standby_already_logged', 1);
                 $logMsg = "[STAND-BY] Voiture débranchée. Bascule auto sur Stand-By.";
-                $eqLogic->checkAndUpdateCmd('statut_action', substr($logMsg, 0, 127));
+                $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($logMsg, 0, 127, 'UTF-8'));
                 log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
             }
 
@@ -474,14 +575,14 @@ class teslasmartcharge extends eqLogic {
                 $msgStatut = 'VEILLE.';
 
                 if ($modeActuelVal == 'Stand-By' && !$_forceOff) {
-                    $infoPinceStr = config::byKey('infoPuissanceVoiture', 'teslasmartcharge');
-                    $puissancePince = $infoPinceStr != '' && is_object(cmd::byString($infoPinceStr)) ? floatval(cmd::byString($infoPinceStr)->execCmd()) : 0;
-                    
-                    if ($puissancePince > 150) { 
+                    $puissancePince = self::readSensor('infoPuissanceVoiture', 0);
+                    if ($puissancePince === null) $puissancePince = 0;
+
+                    if ($puissancePince > 150) {
                         if ($isPlugged) {
                             $eqLogic->checkAndUpdateCmd('mode_actuel', 'Solaire');
                             $logMsg = "[MODE] Rebranchement confirmé ({$puissancePince}W). Bascule auto en Solaire.";
-                            $eqLogic->checkAndUpdateCmd('statut_action', substr($logMsg, 0, 127));
+                            $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($logMsg, 0, 127, 'UTF-8'));
                             log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
                             
                             self::solarListener(array('options' => array('eqLogic_id' => $eqLogic->getId()), 'force' => true));
@@ -491,13 +592,11 @@ class teslasmartcharge extends eqLogic {
                             if (time() - $lastRefresh > 60) {
                                 $cmdRefresh = $teslaEq->getCmd(null, 'refresh');
                                 if (is_object($cmdRefresh)) {
-                                    self::incrementApiCounter($eqLogic, 'info');
-                                    log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Ordre de REFRESH (Vérification branchement).");
-                                    $cmdRefresh->execCmd();
+                                    self::sendOrder($eqLogic, $cmdRefresh, null, "Ordre de REFRESH (Vérification branchement).", 'info');
                                     $eqLogic->setCache('last_reconnect_refresh', time());
                                 }
                                 $logMsg = "[API TESLA] Conso détectée ({$puissancePince}W). Actualisation Tesla...";
-                                $eqLogic->checkAndUpdateCmd('statut_action', substr($logMsg, 0, 127));
+                                $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($logMsg, 0, 127, 'UTF-8'));
                                 log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
                             }
                             continue; 
@@ -509,8 +608,8 @@ class teslasmartcharge extends eqLogic {
                 $eqLogic->setCache('standby_already_logged', 0);
 
                 $datePlanifieeVal = is_object($eqLogic->getCmd(null, 'date_planifiee')) ? $eqLogic->getCmd(null, 'date_planifiee')->execCmd() : '';
-                $targetTime = strtotime($datePlanifieeVal);
-                
+                $targetTime = strtotime((string) $datePlanifieeVal);
+
                 if ($batterieVal >= $cibleCharge || ($currentAmperage > 0 && $expectedDuration == 0) || !$targetTime || $targetTime <= time()) {
                     $ordreDeCharge = 'stop';
                     $eqLogic->checkAndUpdateCmd('mode_actuel', 'Stand-By');
@@ -575,14 +674,14 @@ class teslasmartcharge extends eqLogic {
 
             $isAwake = false;
             if (is_object($cmdAwake)) {
-                $val = strtolower($cmdAwake->execCmd());
+                $val = strtolower((string) $cmdAwake->execCmd());
                 if (in_array($val, ['1', 'true', 'online', 'awake'])) $isAwake = true;
             }
-            
+
             if (!isset($puissancePince)) {
                 // variable seulement définie plus haut en mode Stand-By : sans elle, PHP émettait un avertissement à chaque passage
-                $infoPinceStr = config::byKey('infoPuissanceVoiture', 'teslasmartcharge');
-                $puissancePince = ($infoPinceStr != '' && is_object(cmd::byString($infoPinceStr))) ? floatval(cmd::byString($infoPinceStr)->execCmd()) : 0;
+                $puissancePince = self::readSensor('infoPuissanceVoiture', 0);
+                if ($puissancePince === null) $puissancePince = 0;
             }
             $isCharging = ($currentAmperage > 0 || $puissancePince > 200);
             $nextCheckStr = date('H:i:s', time() + 60);
@@ -602,7 +701,7 @@ class teslasmartcharge extends eqLogic {
                         if ($timeSinceLastWakeup < 1800) {
                             if ($forceLog) {
                                 $logMsg = "[SECURITE] Ignore pdt ".(1800 - $timeSinceLastWakeup)."s. | Chk: {$nextCheckStr}";
-                                $eqLogic->checkAndUpdateCmd('statut_action', substr($logMsg, 0, 127));
+                                $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($logMsg, 0, 127, 'UTF-8'));
                                 log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
                             }
                             continue;
@@ -616,14 +715,12 @@ class teslasmartcharge extends eqLogic {
                             $lastRefreshTime = $eqLogic->getCache('last_refresh_time', 0);
                             if (time() - $lastRefreshTime >= 30) {
                                 if (is_object($cmdRefresh)) {
-                                    self::incrementApiCounter($eqLogic, 'info');
-                                    log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Ordre de REFRESH (Actualisation API) envoyé.");
-                                    $cmdRefresh->execCmd();
+                                    self::sendOrder($eqLogic, $cmdRefresh, null, "Ordre de REFRESH (Actualisation API) envoyé.", 'info');
                                 }
                                 $eqLogic->setCache('last_refresh_time', time());
                             }
                             $logMsg = "[ATTENTE API] Interrogation Tesla en cours ({$timeSinceLastWakeup}s/150s)";
-                            $eqLogic->checkAndUpdateCmd('statut_action', substr($logMsg, 0, 127));
+                            $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($logMsg, 0, 127, 'UTF-8'));
                             log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
                             continue;
                         } else {
@@ -631,7 +728,7 @@ class teslasmartcharge extends eqLogic {
                             $eqLogic->setCache('wakeup_pending', 0);
                             $eqLogic->setCache('last_wakeup_time', time());
                             $logMsg = "[ECHEC] Tesla injoignable. Pause 30m. | Chk: {$nextCheckStr}";
-                            $eqLogic->checkAndUpdateCmd('statut_action', substr($logMsg, 0, 127));
+                            $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($logMsg, 0, 127, 'UTF-8'));
                             log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
                             continue;
                         }
@@ -641,15 +738,13 @@ class teslasmartcharge extends eqLogic {
                     $eqLogic->setCache('last_wakeup_time', time());
                     $eqLogic->setCache('last_refresh_time', time());
                     $logMsg = "[API TESLA] Envoi ordre réveil... | Chk: {$nextCheckStr}";
-                    $eqLogic->checkAndUpdateCmd('statut_action', substr($logMsg, 0, 127));
+                    $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($logMsg, 0, 127, 'UTF-8'));
                     log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
                     
                     if (is_object($cmdWakeUpStr)) {
-                        self::incrementApiCounter($eqLogic, 'ordre');
-                        log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Ordre de RÉVEIL envoyé.");
-                        $cmdWakeUpStr->execCmd(array('select' => '1'));
+                        self::sendOrder($eqLogic, $cmdWakeUpStr, array('select' => '1'), "Ordre de RÉVEIL envoyé.");
                     }
-                    continue; 
+                    continue;
                 }
 
                 $startTimeCron = $eqLogic->getCache('starting_sequence_cron', 0);
@@ -657,48 +752,58 @@ class teslasmartcharge extends eqLogic {
                 if (!$isCharging) {
                     if (time() - $startTimeCron > 180) { 
                         $finalMsg = "[DEMARRAGE] " . strip_tags($msgStatut) . " | Attente API | Chk: {$nextCheckStr}";
-                        $eqLogic->checkAndUpdateCmd('statut_action', substr($finalMsg, 0, 127));
+                        $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($finalMsg, 0, 127, 'UTF-8'));
                         log::add('teslasmartcharge', 'debug', "STATUT : " . $finalMsg);
                         
                         if (is_object($cmdControlStr)) {
-                            self::incrementApiCounter($eqLogic, 'ordre');
-                            log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Envoi de l'ordre de DÉMARRAGE de la charge (1).");
-                            $cmdControlStr->execCmd(array('select' => '1')); 
+                            self::sendOrder($eqLogic, $cmdControlStr, array('select' => '1'), "Envoi de l'ordre de DÉMARRAGE de la charge (1).");
                         }
                         $eqLogic->setCache('starting_sequence_cron', time());
                         sleep(2);
                         if (is_object($cmdAmperageStr)) {
-                            self::incrementApiCounter($eqLogic, 'ordre');
-                            log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Modification de l'ampérage à {$ampereAEnvoyer}A.");
-                            $cmdAmperageStr->execCmd(array('slider' => $ampereAEnvoyer));
+                            if (self::sendOrder($eqLogic, $cmdAmperageStr, array('slider' => (int) $ampereAEnvoyer), "Modification de l'ampérage à {$ampereAEnvoyer}A.")) {
+                                self::rememberOrder($eqLogic, $ampereAEnvoyer);
+                            }
                         }
                     } else {
                         $finalMsg = "[DEMARRAGE] " . strip_tags($msgStatut) . " | Commande OK | Chk: {$nextCheckStr}";
-                        $eqLogic->checkAndUpdateCmd('statut_action', substr($finalMsg, 0, 127));
+                        $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($finalMsg, 0, 127, 'UTF-8'));
                         log::add('teslasmartcharge', 'debug', "STATUT : " . $finalMsg);
                     }
                 } else {
                     $eqLogic->setCache('starting_sequence_cron', 0); 
                     
-                    $etaStr = ($expectedDuration > 0) ? date('H:i', time() + ($expectedDuration * 60)) : "--:--";
+                    $etaStr = ($expectedDuration > 0) ? date('H:i', time() + (int) round($expectedDuration * 60)) : "--:--";
                     if ($batterieVal >= $cibleCharge) $etaStr = "OK";
-                    
+
                     $metrics = " | ".round($puissancePince)."W | Fin: {$etaStr} | Chk: {$nextCheckStr}";
+
+                    // Dernière consigne envoyée : oubliée dès que le courant lu la rejoint ; pas de renvoi pendant 120 s sinon.
+                    $lastCmdAmp = (int) $eqLogic->getCache('last_cmd_amp', -1);
+                    $lastCmdTime = (int) $eqLogic->getCache('last_cmd_time', 0);
+                    if ($lastCmdAmp >= 0 && (int) $currentAmperage === $lastCmdAmp) {
+                        $eqLogic->setCache('last_cmd_amp', -1);
+                        $lastCmdAmp = -1;
+                    }
+                    $ordreEnAttente = ($lastCmdAmp >= 0 && (time() - $lastCmdTime) < 120 && (int) $ampereAEnvoyer === $lastCmdAmp);
 
                     if ($currentAmperage != $ampereAEnvoyer && $ampereAEnvoyer > 0) {
                         $finalMsg = "[AJUST] " . strip_tags($msgStatut) . $metrics;
-                        $eqLogic->checkAndUpdateCmd('statut_action', substr($finalMsg, 0, 127));
+                        if ($ordreEnAttente) {
+                            $finalMsg = "[ATTENTE RETOUR] " . strip_tags($msgStatut) . $metrics;
+                        }
+                        $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($finalMsg, 0, 127, 'UTF-8'));
                         log::add('teslasmartcharge', 'debug', "STATUT : " . $finalMsg);
-                        
-                        if (is_object($cmdAmperageStr)) {
-                            self::incrementApiCounter($eqLogic, 'ordre');
-                            log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Modification de l'ampérage à {$ampereAEnvoyer}A.");
-                            $cmdAmperageStr->execCmd(array('slider' => $ampereAEnvoyer));
+
+                        if (is_object($cmdAmperageStr) && !$ordreEnAttente) {
+                            if (self::sendOrder($eqLogic, $cmdAmperageStr, array('slider' => (int) $ampereAEnvoyer), "Modification de l'ampérage à {$ampereAEnvoyer}A.")) {
+                                self::rememberOrder($eqLogic, $ampereAEnvoyer);
+                            }
                         }
                     } else {
                         if ($forceLog) {
                             $finalMsg = "[STABLE] " . strip_tags($msgStatut) . $metrics;
-                            $eqLogic->checkAndUpdateCmd('statut_action', substr($finalMsg, 0, 127));
+                            $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($finalMsg, 0, 127, 'UTF-8'));
                             log::add('teslasmartcharge', 'debug', "STATUT : " . $finalMsg);
                         }
                     }
@@ -708,13 +813,13 @@ class teslasmartcharge extends eqLogic {
                 if ($isAwake) {
                     if ($isCharging || $_forceOff) {
                         $finalMsg = "[ARRET] Ordre d'arrêt de la charge envoyé.";
-                        $eqLogic->checkAndUpdateCmd('statut_action', substr($finalMsg, 0, 127));
+                        $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($finalMsg, 0, 127, 'UTF-8'));
                         log::add('teslasmartcharge', 'debug', "STATUT : " . $finalMsg);
                         
                         if (is_object($cmdControlStr)) {
-                            self::incrementApiCounter($eqLogic, 'ordre');
-                            log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Envoi de l'ordre d'ARRÊT de la charge (0).");
-                            $cmdControlStr->execCmd(array('select' => '0')); 
+                            if (self::sendOrder($eqLogic, $cmdControlStr, array('select' => '0'), "Envoi de l'ordre d'ARRÊT de la charge (0).")) {
+                                self::rememberOrder($eqLogic, 0);
+                            }
                         }
                     } else {
                         if ($modeActuelVal == 'Stand-By') {
@@ -725,14 +830,14 @@ class teslasmartcharge extends eqLogic {
                                 } else {
                                     $msg = "[STAND-BY] Voiture arrêtée. Plugin en veille.";
                                 }
-                                $eqLogic->checkAndUpdateCmd('statut_action', substr($msg, 0, 127));
+                                $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($msg, 0, 127, 'UTF-8'));
                                 log::add('teslasmartcharge', 'debug', "STATUT : " . $msg);
                                 $eqLogic->setCache('standby_already_logged', 1);
                             }
                         } else {
                             if ($forceLog) {
                                 $finalMsg = "[VEILLE] " . strip_tags($msgStatut) . " | Bat: {$batterieVal}% | Chk: {$nextCheckStr}";
-                                $eqLogic->checkAndUpdateCmd('statut_action', substr($finalMsg, 0, 127));
+                                $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($finalMsg, 0, 127, 'UTF-8'));
                                 log::add('teslasmartcharge', 'debug', "STATUT : " . $finalMsg);
                             }
                         }
@@ -746,14 +851,14 @@ class teslasmartcharge extends eqLogic {
                             } else {
                                 $msg = "[STAND-BY] Voiture endormie. Plugin en veille.";
                             }
-                            $eqLogic->checkAndUpdateCmd('statut_action', substr($msg, 0, 127));
+                            $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($msg, 0, 127, 'UTF-8'));
                             log::add('teslasmartcharge', 'debug', "STATUT : " . $msg);
                             $eqLogic->setCache('standby_already_logged', 1);
                         }
                     } else {
                         if ($forceLog) {
                             $finalMsg = "[DODO] " . strip_tags($msgStatut) . " | Bat: {$batterieVal}% | Chk: {$nextCheckStr}";
-                            $eqLogic->checkAndUpdateCmd('statut_action', substr($finalMsg, 0, 127));
+                            $eqLogic->checkAndUpdateCmd('statut_action', mb_substr($finalMsg, 0, 127, 'UTF-8'));
                             log::add('teslasmartcharge', 'debug', "STATUT : " . $finalMsg);
                         }
                     }
@@ -762,28 +867,38 @@ class teslasmartcharge extends eqLogic {
         }
     }
 
+    public function preRemove() {
+        // Supprime le listener de l'équipement (identifiant en entier ou en chaîne) pour ne pas laisser de listener orphelin.
+        foreach (array(intval($this->getId()), strval($this->getId())) as $idForm) {
+            $l = listener::byClassAndFunction('teslasmartcharge', 'solarListener', array('eqLogic_id' => $idForm));
+            if (is_object($l)) {
+                $l->remove();
+            }
+        }
+    }
+
     public function postSave() {
-        $listener = listener::byClassAndFunction('teslasmartcharge', 'solarListener', array('eqLogic_id' => $this->getId()));
+        // Le listener est cherché avec l'identifiant en entier ; un éventuel doublon créé avec l'identifiant en chaîne est supprimé.
+        $listener = listener::byClassAndFunction('teslasmartcharge', 'solarListener', array('eqLogic_id' => intval($this->getId())));
+        $legacy = listener::byClassAndFunction('teslasmartcharge', 'solarListener', array('eqLogic_id' => strval($this->getId())));
+        if (is_object($legacy) && (!is_object($listener) || $legacy->getId() != $listener->getId())) {
+            $legacy->remove();
+        }
         if (!is_object($listener)) {
             $listener = new listener();
             $listener->setClass('teslasmartcharge');
             $listener->setFunction('solarListener');
-            $listener->setOption(array('eqLogic_id' => $this->getId()));
         }
+        $listener->setOption(array('eqLogic_id' => intval($this->getId())));
         $listener->emptyEvent();
-        
-        $cmdHabitationStr = config::byKey('infoHabitation', 'teslasmartcharge');
-        $cmdNiveauBatStr = config::byKey('infoBatterieMaison', 'teslasmartcharge');
-        $cmdPuissanceBatStr = config::byKey('infoPuissanceBatterieMaison', 'teslasmartcharge');
-        $infoPinceStr = config::byKey('infoPuissanceVoiture', 'teslasmartcharge'); 
 
         log::add('teslasmartcharge', 'debug', ">>> Configuration des Listeners de l'équipement " . $this->getName());
 
-        if ($cmdHabitationStr != '' && is_object(cmd::byString($cmdHabitationStr))) { $listener->addEvent(cmd::byString($cmdHabitationStr)->getId()); }
-        if ($cmdNiveauBatStr != '' && is_object(cmd::byString($cmdNiveauBatStr))) { $listener->addEvent(cmd::byString($cmdNiveauBatStr)->getId()); }
-        if ($cmdPuissanceBatStr != '' && is_object(cmd::byString($cmdPuissanceBatStr))) { $listener->addEvent(cmd::byString($cmdPuissanceBatStr)->getId()); }
-        if ($infoPinceStr != '' && is_object(cmd::byString($infoPinceStr))) { $listener->addEvent(cmd::byString($infoPinceStr)->getId()); }
-        
+        foreach (array('infoHabitation', 'infoBatterieMaison', 'infoPuissanceBatterieMaison', 'infoPuissanceVoiture') as $sensorKey) {
+            $sensorCmd = self::cmdFromString(config::byKey($sensorKey, 'teslasmartcharge'));
+            if (is_object($sensorCmd)) { $listener->addEvent($sensorCmd->getId()); }
+        }
+
         $listener->save();
 
         $cmd = $this->getCmd(null, 'api_appels_infos');
@@ -817,7 +932,7 @@ class teslasmartcharge extends eqLogic {
         $cmd->setSubType('slider'); 
         $cmd->setTemplate('dashboard', 'teslasmartcharge::tsc_battery_v');
         $cmd->setTemplate('mobile', 'teslasmartcharge::tsc_battery_v');
-        $cmd->setConfiguration('minValue', 10); 
+        $cmd->setConfiguration('minValue', 0);
         $cmd->setConfiguration('maxValue', 100); 
         $cmd->setConfiguration('step', 1); 
         $cmd->setValue($this->getCmd(null, 'seuil_batterie_maison')->getId()); 
@@ -925,7 +1040,11 @@ class teslasmartchargeCmd extends cmd {
 
         switch ($this->getLogicalId()) {
             case 'set_priorite_charge':
-                $val = $_options['select'];
+                $val = isset($_options['select']) ? $_options['select'] : '';
+                if (!in_array($val, array('voiture', 'maison'), true)) {
+                    log::add('teslasmartcharge', 'warning', "Priorité de charge invalide ignorée : " . (is_scalar($val) ? $val : gettype($val)));
+                    break;
+                }
                 $eqLogic->checkAndUpdateCmd('priorite_charge', $val);
                 $logMsg = "[RÉGLAGE] Priorité définie sur : {$val}.";
                 $eqLogic->checkAndUpdateCmd('statut_action', $logMsg);
@@ -933,7 +1052,11 @@ class teslasmartchargeCmd extends cmd {
                 break;
                 
             case 'set_seuil_batterie_maison':
-                $val = floatval($_options['slider']);
+                if (!isset($_options['slider']) || !is_numeric($_options['slider'])) {
+                    log::add('teslasmartcharge', 'warning', "Seuil de batterie maison invalide ignoré.");
+                    break;
+                }
+                $val = max(0, min(100, floatval($_options['slider'])));
                 $eqLogic->checkAndUpdateCmd('seuil_batterie_maison', $val);
                 $logMsg = "[RÉGLAGE] Seuil batterie maison défini à {$val}%.";
                 $eqLogic->checkAndUpdateCmd('statut_action', $logMsg);
@@ -941,7 +1064,11 @@ class teslasmartchargeCmd extends cmd {
                 break;
                 
             case 'set_cible_charge':
-                $val = floatval($_options['slider']);
+                if (!isset($_options['slider']) || !is_numeric($_options['slider'])) {
+                    log::add('teslasmartcharge', 'warning', "Cible de charge invalide ignorée.");
+                    break;
+                }
+                $val = max(10, min(100, floatval($_options['slider'])));
                 $eqLogic->checkAndUpdateCmd('cible_charge', $val);
                 
                 $modeActuelVal = is_object($eqLogic->getCmd(null, 'mode_actuel')) ? $eqLogic->getCmd(null, 'mode_actuel')->execCmd() : '';
@@ -954,12 +1081,12 @@ class teslasmartchargeCmd extends cmd {
                 
                 $eqLogic->checkAndUpdateCmd('statut_action', $logMsg);
                 log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
-                if ($modeActuelVal == 'Planifié') teslasmartcharge::cron();
+                if ($modeActuelVal == 'Planifié') teslasmartcharge::cron(false, $eqLogic->getId());
                 break;
-                
+
             case 'set_date_planifiee':
                 $val = isset($_options['message']) ? $_options['message'] : (isset($_options['slider']) ? $_options['slider'] : '');
-                $targetTime = strtotime($val);
+                $targetTime = strtotime((string) $val);
                 
                 if ($targetTime) {
                     if ($targetTime <= time()) {
@@ -988,7 +1115,7 @@ class teslasmartchargeCmd extends cmd {
                         
                         $eqLogic->checkAndUpdateCmd('statut_action', $logMsg);
                         log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
-                        if ($modeActuelVal == 'Planifié') teslasmartcharge::cron();
+                        if ($modeActuelVal == 'Planifié') teslasmartcharge::cron(false, $eqLogic->getId());
                     }
                 }
                 break;
@@ -1005,12 +1132,16 @@ class teslasmartchargeCmd extends cmd {
                 break;
                 
             case 'set_mode': 
-                $val = $_options['select'];
+                $val = isset($_options['select']) ? $_options['select'] : '';
+                if (!in_array($val, array('Solaire', 'Planifié', 'Stand-By', 'Non actif'), true)) {
+                    log::add('teslasmartcharge', 'warning', "Mode invalide ignoré : " . (is_scalar($val) ? $val : gettype($val)));
+                    break;
+                }
                 $cibleCharge = is_object($eqLogic->getCmd(null, 'cible_charge')) ? floatval($eqLogic->getCmd(null, 'cible_charge')->execCmd()) : 100;
 
                 if ($val == 'Planifié') {
                     $datePlanifieeVal = is_object($eqLogic->getCmd(null, 'date_planifiee')) ? $eqLogic->getCmd(null, 'date_planifiee')->execCmd() : '';
-                    $targetTime = strtotime($datePlanifieeVal);
+                    $targetTime = strtotime((string) $datePlanifieeVal);
                     
                     if (!$targetTime || $targetTime <= time()) {
                         $eqLogic->checkAndUpdateCmd('mode_actuel', 'Stand-By');
@@ -1035,7 +1166,7 @@ class teslasmartchargeCmd extends cmd {
                 } 
                 elseif ($val == 'Planifié') {
                     $datePlanifieeVal = is_object($eqLogic->getCmd(null, 'date_planifiee')) ? $eqLogic->getCmd(null, 'date_planifiee')->execCmd() : '';
-                    $targetTime = strtotime($datePlanifieeVal);
+                    $targetTime = strtotime((string) $datePlanifieeVal);
                     $heureStr = date('d/m/Y à H\hi', $targetTime);
 
                     $planMsg = teslasmartcharge::getChargingPlan($eqLogic);
@@ -1043,14 +1174,14 @@ class teslasmartchargeCmd extends cmd {
                     $logMsg = "[MODE] Planifié activé (Cible: {$cibleCharge}%, Prêt le: {$heureStr}). " . $planMsg;
                     $eqLogic->checkAndUpdateCmd('statut_action', $logMsg);
                     log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
-                    teslasmartcharge::cron();
+                    teslasmartcharge::cron(false, $eqLogic->getId());
                 } 
                 elseif ($val == 'Stand-By') {
                     $logMsg = "[MODE] Bascule manuelle en Stand-By.";
                     $eqLogic->checkAndUpdateCmd('statut_action', $logMsg);
                     log::add('teslasmartcharge', 'debug', "STATUT : " . $logMsg);
                     $eqLogic->setCache('standby_already_logged', 0); 
-                    teslasmartcharge::cron(true); 
+                    teslasmartcharge::cron(true, $eqLogic->getId());
                 }
                 elseif ($val == 'Non actif') {
                     $logMsg = "[MODE] Plugin TOTALEMENT DÉSACTIVÉ (Mode manuel). Aucune action ne sera entreprise.";
