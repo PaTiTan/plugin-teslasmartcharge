@@ -587,6 +587,11 @@ class teslasmartcharge extends eqLogic {
                 if (in_array($val, ['1', 'true', 'online', 'awake'])) $isAwake = true;
             }
             
+            if (!isset($puissancePince)) {
+                // variable seulement définie plus haut en mode Stand-By : sans elle, PHP émettait un avertissement à chaque passage
+                $infoPinceStr = config::byKey('infoPuissanceVoiture', 'teslasmartcharge');
+                $puissancePince = ($infoPinceStr != '' && is_object(cmd::byString($infoPinceStr))) ? floatval(cmd::byString($infoPinceStr)->execCmd()) : 0;
+            }
             $isCharging = ($currentAmperage > 0 || $puissancePince > 200);
             $nextCheckStr = date('H:i:s', time() + 60);
 

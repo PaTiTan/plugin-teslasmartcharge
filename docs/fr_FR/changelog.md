@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1-beta
+
+- Correctif : avertissement PHP « Undefined variable \$puissancePince » à chaque passage du cron hors mode Stand-By.
+
 ## 1.2.0-beta
 
 - Les **hausses** d'ampérage sont confirmées en 10 s (au lieu de 60 s) : moins de soleil gaspillé quand le surplus est important. Les **baisses** restent confirmées 60 s (pour ne pas réagir à un nuage) et la coupure d'urgence « maison se vide » reste immédiate.
