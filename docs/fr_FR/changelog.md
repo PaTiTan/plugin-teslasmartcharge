@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.1-beta
+
+- Correctif : les plages d'heures creuses n'étaient pas mémorisées (Jeedom décode automatiquement les valeurs ressemblant à du JSON). Nouveau format texte.
+
 ## 1.1.0-beta
 
 - Plusieurs plages d'heures creuses, avec un sélecteur d'heure (le mode Planifié les utilise toutes).

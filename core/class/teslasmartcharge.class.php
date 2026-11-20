@@ -49,12 +49,12 @@ class teslasmartcharge extends eqLogic {
             $json = config::byKey('hc_slots', 'teslasmartcharge', '');
         }
         $slots = array();
-        $list = json_decode((string) $json, true);
-        if (is_array($list)) {
-            foreach ($list as $sl) {
-                $a = isset($sl['s']) ? self::parseHm($sl['s']) : null;
-                $b = isset($sl['e']) ? self::parseHm($sl['e']) : null;
-                if ($a !== null && $b !== null && $a != $b) {
+        // format texte "00:50-06:50;14:20-16:20"
+        if (is_string($json) && preg_match_all('/(\d{1,2})\s*[:h]\s*(\d{2})\s*-\s*(\d{1,2})\s*[:h]\s*(\d{2})/', $json, $mm, PREG_SET_ORDER)) {
+            foreach ($mm as $m) {
+                $a = intval($m[1]) * 60 + intval($m[2]);
+                $b = intval($m[3]) * 60 + intval($m[4]);
+                if ($a != $b) {
                     $slots[] = array($a, $b);
                 }
             }

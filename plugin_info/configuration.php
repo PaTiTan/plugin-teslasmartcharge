@@ -82,11 +82,12 @@ if (!isConnect()) {
         return m.slice(0, 2) + 'h' + m.slice(2);
     }
     function sync() {
+        // Format texte "00:50-06:50;14:20-16:20" (Jeedom décode automatiquement toute valeur qui ressemble à du JSON)
         var list = [];
         $box.find('.tscSlot').each(function () {
-            list.push({ s: $(this).find('.tscS').val().replace('h', ':'), e: $(this).find('.tscE').val().replace('h', ':') });
+            list.push($(this).find('.tscS').val().replace('h', ':') + '-' + $(this).find('.tscE').val().replace('h', ':'));
         });
-        $store.val(JSON.stringify(list)).trigger('change');
+        $store.val(list.join(';')).trigger('change');
     }
     function picker($input) {
         $input.clockTimePicker({
@@ -111,8 +112,8 @@ if (!isConnect()) {
         picker($r.find('.tscE'));
     }
     function load(v) {
-        var list = [];
-        try { list = JSON.parse(v) || []; } catch (x) { list = []; }
+        var list = [], re = /(\d{1,2})[:h](\d{2})\s*-\s*(\d{1,2})[:h](\d{2})/g, m;
+        while ((m = re.exec(String(v || ''))) !== null) { list.push({ s: m[1] + ':' + m[2], e: m[3] + ':' + m[4] }); }
         if (!list.length) { list = [legacy]; }
         $box.empty();
         list.forEach(function (sl) { addRow(sl.s, sl.e); });
