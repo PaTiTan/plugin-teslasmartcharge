@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.0-beta
+
+- **Priorité Maison sans attente** : sous le seuil de batterie, la charge de la voiture n'est plus arrêtée. La batterie passe d'abord, mais la voiture prend tout ce que la batterie n'absorbe pas (l'injection) et charge dès 2 A. Au-dessus du seuil, elle prend aussi le surplus qui chargerait la batterie.
+
 ## 1.2.1-beta
 
 - Correctif : avertissement PHP « Undefined variable $puissancePince » à chaque passage du cron hors mode Stand-By.

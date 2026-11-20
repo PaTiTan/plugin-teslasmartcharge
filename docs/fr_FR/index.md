@@ -24,7 +24,7 @@ Le passage en Stand-By est automatique si la voiture est débranchée ou si la c
 ## Priorité Voiture ou Maison
 
 - **Voiture** : la voiture prend le surplus, y compris celui qui chargerait la batterie.
-- **Maison** : si la batterie est sous le seuil choisi, la charge est arrêtée.
+- **Maison** : tant que la batterie est sous le seuil choisi, la batterie passe d'abord : sa puissance de charge n'est pas offerte à la voiture. La voiture n'attend jamais un niveau de batterie : elle prend tout ce que la batterie n'absorbe pas (l'injection) et charge dès qu'il y a au moins 2 A (460 W). Au-dessus du seuil, elle prend aussi le surplus qui chargerait la batterie.
 
 ## Utilisation avec energyManager
 

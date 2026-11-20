@@ -282,7 +282,12 @@ class teslasmartcharge extends eqLogic {
             }
         }
 
-        $surplusBrut = $puissanceBatMaison - $valeurHabitation - $margeVal;
+        // Priorité « maison » : sous le seuil de SOC, la batterie passe d'abord, donc sa puissance de charge n'est pas offerte à la voiture.
+        // La voiture n'attend JAMAIS un niveau de batterie : elle prend tout ce que la batterie n'absorbe pas (l'injection) et charge dès
+        // qu'il y en a assez (2 A). Au-dessus du seuil, ou en priorité « voiture », la charge de la batterie compte aussi dans son surplus.
+        $batterieDabord = ($priorite == 'maison' && $niveauBatMaison < $seuilBat);
+        $apportBatterie = $batterieDabord ? 0 : $puissanceBatMaison;
+        $surplusBrut = $apportBatterie - $valeurHabitation - $margeVal;
         $puissanceTotaleAllouable = $surplusBrut + $puissancePince;
         
         $ampereParfait = floor($puissanceTotaleAllouable / 230);
@@ -291,21 +296,8 @@ class teslasmartcharge extends eqLogic {
 
         $logMsg = "";
 
-        if ($priorite == 'maison' && $niveauBatMaison < $seuilBat) {
-            $ampereParfait = 0;
-            if ($isCharging) {
-                $logMsg = "[URGENCE] Bat {$niveauBatMaison}%. Arrêt Tesla.";
-                if (is_object($cmdControlStr)) {
-                    self::incrementApiCounter($eqLogic, 'ordre');
-                    log::add('teslasmartcharge', 'info', "🔴 [REQUÊTE API TESLA] -> ACTION : Envoi de l'ordre d'ARRÊT de la charge (0).");
-                    $cmdControlStr->execCmd(array('select' => '0'));
-                }
-            } else {
-                $logMsg = "[PRIORITE] Maison. Attente.";
-            }
-            $eqLogic->setCache('action_pending_since', 0);
-        } 
-        else {
+        // (plus d'arrêt ni d'attente sur le niveau de batterie : voir $batterieDabord plus haut)
+        {
             $actionUrgente = false;
             if ($puissanceBatMaison < -50 && $ampereParfait < $currentAmperage) {
                 $actionUrgente = true;
