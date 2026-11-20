@@ -26,6 +26,71 @@ class teslasmartcharge extends eqLogic {
     }
 
     // ====================================================================
+    // PLAGES D'HEURES CREUSES (plusieurs plages possibles)
+    // ====================================================================
+    private static function parseHm($str) {
+        if (preg_match('/^\s*(\d{1,2})\s*[:h]?\s*(\d{2})\s*$/', (string) $str, $m)) {
+            return intval($m[1]) * 60 + intval($m[2]);
+        }
+        return null;
+    }
+
+    /**
+     * Plages HC en minutes depuis minuit : array(array(debut, fin), ...).
+     * Source : plages d'energyManager si l'option est cochee, sinon les plages du plugin,
+     * sinon l'ancien reglage a une seule plage (defaut 22h-06h).
+     */
+    public static function hcSlots() {
+        $json = '';
+        if (config::byKey('hc_use_energy', 'teslasmartcharge', 0) == 1 && class_exists('energyManager')) {
+            $json = config::byKey('hc_slots', 'energyManager', '');
+        }
+        if ($json === '' || $json === null) {
+            $json = config::byKey('hc_slots', 'teslasmartcharge', '');
+        }
+        $slots = array();
+        $list = json_decode((string) $json, true);
+        if (is_array($list)) {
+            foreach ($list as $sl) {
+                $a = isset($sl['s']) ? self::parseHm($sl['s']) : null;
+                $b = isset($sl['e']) ? self::parseHm($sl['e']) : null;
+                if ($a !== null && $b !== null && $a != $b) {
+                    $slots[] = array($a, $b);
+                }
+            }
+        }
+        if (count($slots) == 0) {
+            $a = self::parseHm(config::byKey('hc_start', 'teslasmartcharge', '22:00'));
+            $b = self::parseHm(config::byKey('hc_end', 'teslasmartcharge', '06:00'));
+            $slots[] = array($a === null ? 1320 : $a, $b === null ? 360 : $b);
+        }
+        return $slots;
+    }
+
+    /** Vrai si la minute du jour (0-1439) est en heure creuse. */
+    public static function isHcAt($minuteOfDay, $slots = null) {
+        if ($slots === null) $slots = self::hcSlots();
+        foreach ($slots as $sl) {
+            if ($sl[0] < $sl[1]) {
+                if ($minuteOfDay >= $sl[0] && $minuteOfDay < $sl[1]) return true;
+            } elseif ($minuteOfDay >= $sl[0] || $minuteOfDay < $sl[1]) {
+                return true; // plage a cheval sur minuit
+            }
+        }
+        return false;
+    }
+
+    /** Nombre de minutes d'heures creuses entre deux timestamps. */
+    public static function hcMinutesBetween($from, $to) {
+        $count = 0;
+        $slots = self::hcSlots();
+        for ($t = $from; $t < $to; $t += 60) {
+            if (self::isHcAt(intval(date('H', $t)) * 60 + intval(date('i', $t)), $slots)) $count++;
+        }
+        return $count;
+    }
+
+    // ====================================================================
     // L'ESTIMATEUR PRÉDICTIF 
     // ====================================================================
     public static function getChargingPlan($eqLogic) {
@@ -46,28 +111,7 @@ class teslasmartcharge extends eqLogic {
 
         if (!$targetTime || $targetTime <= $now) return "";
 
-        $hc_start = config::byKey('hc_start', 'teslasmartcharge', '22:00');
-        $hc_end = config::byKey('hc_end', 'teslasmartcharge', '06:00');
-        $hc_s = str_replace([':', 'h'], '', $hc_start);
-        $hc_e = str_replace([':', 'h'], '', $hc_end);
-        $hc_start_h = intval(substr(str_pad($hc_s, 4, '0', STR_PAD_LEFT), 0, 2));
-        $hc_start_m = intval(substr(str_pad($hc_s, 4, '0', STR_PAD_LEFT), 2, 2));
-        $hc_end_h = intval(substr(str_pad($hc_e, 4, '0', STR_PAD_LEFT), 0, 2));
-        $hc_end_m = intval(substr(str_pad($hc_e, 4, '0', STR_PAD_LEFT), 2, 2));
-        $start_mins = $hc_start_h * 60 + $hc_start_m;
-        $end_mins = $hc_end_h * 60 + $hc_end_m;
-
-        $hc_minutes_available = 0;
-        for ($t = $now; $t < $targetTime; $t += 60) {
-            $t_mins = intval(date('H', $t)) * 60 + intval(date('i', $t));
-            $in_hc = false;
-            if ($start_mins < $end_mins) {
-                if ($t_mins >= $start_mins && $t_mins < $end_mins) $in_hc = true;
-            } else {
-                if ($t_mins >= $start_mins || $t_mins < $end_mins) $in_hc = true;
-            }
-            if ($in_hc) $hc_minutes_available++;
-        }
+        $hc_minutes_available = self::hcMinutesBetween($now, $targetTime);
 
         $delta = $cibleCharge - $batterieVal;
         $mins_at_32 = $delta * 4;
@@ -360,19 +404,6 @@ class teslasmartcharge extends eqLogic {
     // ====================================================================
     public static function cron($_forceOff = false) {
         
-        $hc_start = config::byKey('hc_start', 'teslasmartcharge', '22:00');
-        $hc_end = config::byKey('hc_end', 'teslasmartcharge', '06:00');
-        
-        $hc_s = str_replace([':', 'h'], '', $hc_start);
-        $hc_e = str_replace([':', 'h'], '', $hc_end);
-        $hc_start_h = intval(substr(str_pad($hc_s, 4, '0', STR_PAD_LEFT), 0, 2));
-        $hc_start_m = intval(substr(str_pad($hc_s, 4, '0', STR_PAD_LEFT), 2, 2));
-        $hc_end_h = intval(substr(str_pad($hc_e, 4, '0', STR_PAD_LEFT), 0, 2));
-        $hc_end_m = intval(substr(str_pad($hc_e, 4, '0', STR_PAD_LEFT), 2, 2));
-
-        $start_mins = $hc_start_h * 60 + $hc_start_m;
-        $end_mins = $hc_end_h * 60 + $hc_end_m;
-
         $minuteActuelle = intval(date('i'));
         $isDebugMode = config::byKey('debugMode', 'teslasmartcharge', 0);
         $forceLog = ($minuteActuelle % 5 == 0) || ($isDebugMode == 1 || $isDebugMode == '1');
@@ -495,25 +526,8 @@ class teslasmartcharge extends eqLogic {
                     $now = time();
                     $minutes_available = max(1, round(($targetTime - $now) / 60));
                     
-                    $hc_minutes_available = 0;
-                    for ($t = $now; $t < $targetTime; $t += 60) {
-                        $t_mins = intval(date('H', $t)) * 60 + intval(date('i', $t));
-                        $in_hc = false;
-                        if ($start_mins < $end_mins) {
-                            if ($t_mins >= $start_mins && $t_mins < $end_mins) $in_hc = true;
-                        } else {
-                            if ($t_mins >= $start_mins || $t_mins < $end_mins) $in_hc = true;
-                        }
-                        if ($in_hc) $hc_minutes_available++;
-                    }
-
-                    $now_mins = intval(date('H', $now)) * 60 + intval(date('i', $now));
-                    $isHC_Now = false;
-                    if ($start_mins < $end_mins) { 
-                        if ($now_mins >= $start_mins && $now_mins < $end_mins) $isHC_Now = true;
-                    } else { 
-                        if ($now_mins >= $start_mins || $now_mins < $end_mins) $isHC_Now = true;
-                    }
+                    $hc_minutes_available = self::hcMinutesBetween($now, $targetTime);
+                    $isHC_Now = self::isHcAt(intval(date('H', $now)) * 60 + intval(date('i', $now)));
 
                     if ($currentAmperage > 0 && $expectedDuration > 0) {
                         $ampRequiseHC = ($hc_minutes_available > 0) ? ceil(($expectedDuration * $currentAmperage) / $hc_minutes_available) : 999;

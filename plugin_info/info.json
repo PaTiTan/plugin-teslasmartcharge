@@ -6,8 +6,8 @@
     "author" : "PaTiTan",
     "require" : "4.2.0",
     "category" : "energy",
-    "changelog" : "",
-    "documentation" : "",
+    "changelog" : "https://github.com/PaTiTan/plugin-teslasmartcharge/blob/main/docs/fr_FR/changelog.md",
+    "documentation" : "https://github.com/PaTiTan/plugin-teslasmartcharge/blob/main/docs/fr_FR/index.md",
     "language" : [
         "fr_FR"
     ],
@@ -19,9 +19,9 @@
         "diy",
         "v4"
     ],
-    "version" : "1.0.0-beta",
+    "version" : "1.1.0-beta",
     "hasDependency" : false,
-    "hasOwnDaemon" : false,
+    "hasOwnDeamon" : false,
     "maxDependancyInstallTime" : 0,
-    "issue" : ""
+    "issue" : "https://github.com/PaTiTan/plugin-teslasmartcharge/issues"
 }
